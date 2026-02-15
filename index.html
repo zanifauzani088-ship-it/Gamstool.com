@@ -1,0 +1,172 @@
+/topup
+│── index.php
+│── config.php
+│── midtrans.php
+│── api/
+│   ├── cek_id.php
+│   ├── create_transaction.php
+│   └── callback.php
+│── database.sqlCREATE DATABASE topup;
+USE topup;
+
+CREATE TABLE transaksi (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    order_id VARCHAR(100),
+    game VARCHAR(50),
+    user_id VARCHAR(50),
+    server VARCHAR(20),
+    nominal VARCHAR(50),
+    harga INT,
+    status VARCHAR(20) DEFAULT 'pending',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+<?php
+$conn = new mysqli("localhost", "root", "", "topup");
+if ($conn->connect_error) {
+    die("DB ERROR");
+}
+
+define("MIDTRANS_SERVER_KEY", "ISI_SERVER_KEY_KAMU");
+define("MIDTRANS_CLIENT_KEY", "ISI_CLIENT_KEY_KAMU");
+define("MIDTRANS_IS_PRODUCTION", false); // true jika live
+?>
+<?php
+require_once 'config.php';
+
+\Midtrans\Config::$serverKey = MIDTRANS_SERVER_KEY;
+\Midtrans\Config::$isProduction = MIDTRANS_IS_PRODUCTION;
+\Midtrans\Config::$isSanitized = true;
+\Midtrans\Config::$is3ds = true;
+?>
+composer require midtrans/midtrans-php
+<?php
+header("Content-Type: application/json");
+
+$user_id = $_GET['user_id'];
+
+if(strlen($user_id) >= 6){
+    echo json_encode([
+        "status" => true,
+        "nickname" => "Player_" . substr($user_id,0,4)
+    ]);
+}else{
+    echo json_encode(["status"=>false]);
+}
+<?php
+require_once '../config.php';
+require_once '../midtrans.php';
+
+$data = json_decode(file_get_contents("php://input"), true);
+
+$order_id = "INV-" . time();
+$harga = $data['harga'];
+
+$stmt = $conn->prepare(
+ "INSERT INTO transaksi (order_id, game, user_id, server, nominal, harga)
+  VALUES (?,?,?,?,?,?)"
+);
+$stmt->bind_param(
+ "sssssi",
+ $order_id,
+ $data['game'],
+ $data['user_id'],
+ $data['server'],
+ $data['nominal'],
+ $harga
+);
+$stmt->execute();
+
+$params = [
+  'transaction_details' => [
+    'order_id' => $order_id,
+    'gross_amount' => $harga,
+  ],
+  'item_details' => [[
+    'id' => 'TOPUP',
+    'price' => $harga,
+    'quantity' => 1,
+    'name' => $data['game'].' '.$data['nominal']
+  ]]
+];
+
+$snapToken = \Midtrans\Snap::getSnapToken($params);
+
+echo json_encode([
+    "token" => $snapToken,
+    "order_id" => $order_id
+]);
+<?php
+require_once '../config.php';
+
+$json = json_decode(file_get_contents('php://input'), true);
+
+$signature = hash("sha512",
+  $json['order_id'] .
+  $json['status_code'] .
+  $json['gross_amount'] .
+  MIDTRANS_SERVER_KEY
+);
+
+if($signature !== $json['signature_key']){
+    http_response_code(403);
+    exit;
+}
+
+if($json['transaction_status'] == 'settlement'){
+    $stmt = $conn->prepare(
+      "UPDATE transaksi SET status='paid' WHERE order_id=?"
+    );
+    $stmt->bind_param("s", $json['order_id']);
+    $stmt->execute();
+
+    // DISINI KIRIM KE API TOPUP PROVIDER
+}
+
+echo "OK";
+<!DOCTYPE html>
+<html>
+<head>
+<title>Top Up Game</title>
+<script src="https://app.sandbox.midtrans.com/snap/snap.js"
+data-client-key="ISI_CLIENT_KEY_KAMU"></script>
+</head>
+<body>
+
+<input id="user_id" placeholder="ID Game">
+<input id="server" placeholder="Server">
+<button onclick="cekID()">Cek ID</button>
+<p id="nick"></p>
+
+<button onclick="bayar()">Bayar</button>
+
+<script>
+function cekID(){
+ fetch("api/cek_id.php?user_id="+user_id.value)
+ .then(r=>r.json())
+ .then(d=>{
+   nick.innerText = d.status ? "Nick: "+d.nickname : "ID Salah";
+ });
+}
+
+function bayar(){
+ fetch("api/create_transaction.php",{
+  method:"POST",
+  headers:{'Content-Type':'application/json'},
+  body:JSON.stringify({
+    game:"Mobile Legends",
+    user_id:user_id.value,
+    server:server.value,
+    nominal:"86 Diamond",
+    harga:20000
+  })
+ })
+ .then(r=>r.json())
+ .then(d=>{
+   snap.pay(d.token);
+ });
+}
+</script>
+
+</body>
+</html>
+
